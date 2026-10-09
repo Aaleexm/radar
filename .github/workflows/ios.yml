@@ -1,0 +1,69 @@
+# Compila la app de iPhone en un Mac de GitHub y deja Radar.ipa (sin firmar) como artefacto descargable.
+# La firma se hace al instalarla desde Windows con Sideloadly y un Apple ID.
+name: iOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['index.html', 'css/**', 'js/**', 'icons/**', 'native/**', '.github/workflows/ios.yml']
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: native/package-lock.json
+
+      - name: Dependencias y web
+        run: |
+          npm ci
+          npm run build:www
+
+      - name: Generar proyecto iOS
+        run: |
+          npx cap add ios --packagemanager SPM
+          npx cap sync ios
+
+      - name: Permisos de ubicación, segundo plano e icono
+        run: |
+          PLIST=ios/App/App/Info.plist
+          PB=/usr/libexec/PlistBuddy
+          $PB -c "Add :NSLocationWhenInUseUsageDescription string 'Radar usa tu ubicación para seguirte en el mapa y avisarte de los radares.'" $PLIST
+          $PB -c "Add :NSLocationAlwaysAndWhenInUseUsageDescription string 'Radar usa tu ubicación con la pantalla bloqueada para seguir avisándote de los radares.'" $PLIST
+          $PB -c "Add :UIBackgroundModes array" $PLIST
+          $PB -c "Add :UIBackgroundModes:0 string location" $PLIST
+          $PB -c "Set :CFBundleDisplayName Radar" $PLIST || $PB -c "Add :CFBundleDisplayName string Radar" $PLIST
+          for f in ios/App/App/Assets.xcassets/AppIcon.appiconset/*.png; do cp resources/icon-1024.png "$f"; done
+          cat $PLIST
+
+      - name: Compilar (sin firmar)
+        run: |
+          cd ios/App
+          if [ -d App.xcworkspace ]; then SRC="-workspace App.xcworkspace"; else SRC="-project App.xcodeproj"; fi
+          xcodebuild $SRC -scheme App -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      - name: Empaquetar Radar.ipa
+        run: |
+          cd ios/App
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -qry ../../Radar.ipa Payload
+          ls -la ../../Radar.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Radar-ipa
+          path: native/Radar.ipa
+          retention-days: 30

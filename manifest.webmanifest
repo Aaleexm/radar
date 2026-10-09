@@ -1,0 +1,15 @@
+{
+  "name": "Radar",
+  "short_name": "Radar",
+  "description": "Mapa GPS con estilo de radar de videojuego y avisos de radares de tráfico",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "portrait",
+  "background_color": "#0a0b0c",
+  "theme_color": "#000000",
+  "lang": "es",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

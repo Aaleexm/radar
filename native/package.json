@@ -1,0 +1,19 @@
+{
+  "name": "radar-native",
+  "private": true,
+  "version": "1.0.0",
+  "description": "App nativa de iPhone (Capacitor) que envuelve la web de Radar y añade GPS en segundo plano",
+  "scripts": {
+    "build:www": "node copy-www.mjs",
+    "sync": "npm run build:www && npx cap sync"
+  },
+  "dependencies": {
+    "@capacitor-community/background-geolocation": "^1.2.26",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/ios": "^8.5.3",
+    "@capacitor/local-notifications": "^8.3.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.3"
+  }
+}

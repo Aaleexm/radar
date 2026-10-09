@@ -1,0 +1,9 @@
+{
+  "appId": "com.amorrocalafell.radar",
+  "appName": "Radar",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#0a0b0c"
+  }
+}

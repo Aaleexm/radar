@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Radar</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Oswald:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <link href="css/style.css" rel="stylesheet" />
+</head>
+<body class="mode-radar">
+  <div id="map"></div>
+  <div id="vignette"></div>
+
+  <!-- Blips en el borde de la pantalla (norte y destino) -->
+  <div id="edge-north" class="edge-blip north">N</div>
+  <div id="edge-waypoint" class="edge-blip waypoint hidden"></div>
+
+  <!-- HUD modo radar -->
+  <div id="hud">
+    <div id="hud-top-right">
+      <div id="clock">00:00</div>
+      <div id="wp-distance" class="hidden"></div>
+    </div>
+
+    <div id="radar-alert" class="hidden">
+      <div class="ra-icon"></div>
+      <div class="ra-text">
+        <div class="ra-title">RADAR</div>
+        <div class="ra-dist">500 m</div>
+      </div>
+      <div class="ra-limit hidden">50</div>
+    </div>
+
+    <div id="hud-bottom">
+      <div id="location">
+        <div id="area-name"></div>
+        <div id="street-name"></div>
+      </div>
+      <div id="speed-row">
+        <div id="speed"><span id="speed-val">0</span><small>KM/H</small></div>
+        <button id="btn-report" class="hud-btn" aria-label="Reportar radar móvil">+ RADAR</button>
+      </div>
+      <div id="bars">
+        <div class="bar health"><span class="bar-label">BATERÍA</span><div id="bar-battery"></div></div>
+        <div class="bar armor"><span id="eta" class="bar-label">SIN DESTINO</span><div id="bar-route"></div></div>
+      </div>
+    </div>
+
+    <button id="btn-open-map" class="hud-btn round" aria-label="Abrir mapa">MAPA</button>
+  </div>
+
+  <!-- Menú de pausa (modo mapa) -->
+  <div id="pause">
+    <header id="pause-header">
+      <div class="pause-title">RADAR</div>
+      <nav>
+        <button class="tab active" data-tab="map">MAPA</button>
+        <button class="tab" data-tab="legend">LEYENDA</button>
+        <button class="tab" data-tab="settings">AJUSTES</button>
+      </nav>
+      <div id="search-wrap">
+        <div class="search-row">
+          <input id="search" type="search" placeholder="Buscar dirección, lugar o pegar enlace" autocomplete="off" enterkeyhint="search" />
+          <button id="btn-paste" class="pill" aria-label="Pegar ubicación copiada">PEGAR</button>
+        </div>
+        <div id="places-chips"></div>
+        <ul id="search-results" class="hidden"></ul>
+      </div>
+    </header>
+
+    <section id="panel-legend" class="panel hidden"><ul id="legend-list"></ul></section>
+    <section id="panel-settings" class="panel hidden">
+      <div class="setting">
+        <span>Ruta</span>
+        <div class="seg" id="seg-profile">
+          <button data-v="driving">COCHE</button>
+          <button data-v="foot">A PIE</button>
+        </div>
+      </div>
+      <div class="setting">
+        <span>Avisos de radar</span>
+        <div class="seg" id="seg-alerts">
+          <button data-v="on">SÍ</button>
+          <button data-v="off">NO</button>
+        </div>
+      </div>
+      <div class="setting">
+        <span>Sonido</span>
+        <div class="seg" id="seg-sound">
+          <button data-v="on">SÍ</button>
+          <button data-v="off">NO</button>
+        </div>
+      </div>
+      <div class="setting">
+        <span>Probar aviso</span>
+        <button id="btn-test-sound" class="pill">SONAR</button>
+      </div>
+      <p class="note">Radares fijos: OpenStreetMap. Radares móviles: compartidos por todos los usuarios (caducan a las 3 h; se renuevan si alguien los confirma).<br />Mapa © OpenStreetMap · OpenFreeMap</p>
+    </section>
+
+    <footer id="pause-footer">
+      <div id="pause-hint">Toca el mapa para marcar destino</div>
+      <div class="pause-actions">
+        <button id="btn-center" class="pill">CENTRAR</button>
+        <button id="btn-save-here" class="pill">📍 GUARDAR AQUÍ</button>
+        <button id="btn-save-place" class="pill hidden">★ GUARDAR DESTINO</button>
+        <button id="btn-clear-wp" class="pill hidden">QUITAR DESTINO</button>
+        <button id="btn-sim" class="pill hidden">SIMULAR</button>
+        <button id="btn-close-map" class="pill primary">VOLVER</button>
+      </div>
+    </footer>
+  </div>
+
+  <div id="save-dialog" class="hidden">
+    <div class="sd-box">
+      <div class="sd-title">GUARDAR UBICACIÓN</div>
+      <div id="sd-address" class="sd-address"></div>
+      <div id="sd-presets" class="sd-presets"></div>
+      <input id="sd-name" type="text" placeholder="…o escribe otro nombre" maxlength="30" />
+      <div class="sd-actions">
+        <button id="sd-cancel" class="pill">CANCELAR</button>
+        <button id="sd-ok" class="pill primary">GUARDAR</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+  <div id="splash" class="hidden"><div class="splash-big"></div><div class="splash-small"></div></div>
+
+  <!-- Pantalla inicial (necesaria para pedir GPS/brújula con un gesto del usuario) -->
+  <div id="start">
+    <div class="start-logo">RADAR</div>
+    <div class="start-sub">GPS · RADARES · NAVEGACIÓN</div>
+    <button id="btn-start">PULSA PARA EMPEZAR</button>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
