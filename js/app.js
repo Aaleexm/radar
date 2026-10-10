@@ -301,7 +301,8 @@ function startCompass() {
 }
 
 function radarPadding() {
-  return { top: 0, bottom: Math.round(window.innerHeight * 0.4), left: 0, right: 0 };
+  // Margen arriba: el centro de la cámara (donde va la flecha) baja a ~2/3 de la pantalla y se ve más carretera por delante
+  return { top: Math.round(window.innerHeight * 0.3), bottom: 0, left: 0, right: 0 };
 }
 
 function radarZoom() {
