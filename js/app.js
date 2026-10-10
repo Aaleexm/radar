@@ -19,10 +19,11 @@ const $ = (sel) => document.querySelector(sel);
 const NATIVE = !!window.Capacitor?.isNativePlatform?.();
 const BgGeo = NATIVE ? window.Capacitor.registerPlugin('BackgroundGeolocation') : null;
 const Notif = NATIVE ? window.Capacitor.registerPlugin('LocalNotifications') : null;
+const Tts = NATIVE ? window.Capacitor.registerPlugin('TextToSpeech') : null;
 
 // ---------- Ajustes persistentes ----------
 const settings = Object.assign(
-  { profile: 'driving', alerts: 'on', sound: 'on' },
+  { profile: 'driving', alerts: 'on', sound: 'on', voice: 'on' },
   (() => {
     try {
       return JSON.parse(localStorage.getItem('radar.settings')) || {};
@@ -173,35 +174,87 @@ function updateTripBar(remainingM = null, remainingS = null) {
 }
 
 // ---------- Sonido / vibración ----------
+// Audio sin cortar tu música:
+//  - "transient" (Safari/iOS): la música de otras apps baja de volumen mientras suena el aviso y luego vuelve.
+//  - Al terminar cada aviso se suspende el audio para soltar el control y que la música recupere su volumen.
+//  - En la app nativa, si el sistema no ofrece este modo, no se usa el audio web (en iOS pausaría la música):
+//    avisa la voz nativa, que también baja el volumen de la música en vez de pararla.
 let audioCtx;
-// iPhone: tipo "playback" para que suene aunque el interruptor de silencio esté activado (Safari 17+)
+let audioIdle;
 function initAudio() {
+  if (NATIVE && !navigator.audioSession) return null;
   try {
-    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    if (navigator.audioSession) navigator.audioSession.type = 'transient';
   } catch {}
-  audioCtx ??= new AudioContext();
-  if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
+  try {
+    audioCtx ??= new AudioContext();
+  } catch {
+    return null;
+  }
   return audioCtx;
 }
 
+function releaseAudioLater(ms) {
+  clearTimeout(audioIdle);
+  audioIdle = setTimeout(() => {
+    audioCtx?.suspend().catch(() => {});
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = 'auto';
+    } catch {}
+  }, ms);
+}
+
+// Devuelve cuánto dura (ms) para que la voz hable justo después del pitido
 function beep(times, freq, gap = 0.16) {
-  if (settings.sound !== 'on') return;
+  if (settings.sound !== 'on') return 0;
+  const ctx = initAudio();
+  if (!ctx) return 0;
   try {
-    initAudio();
-    const t0 = audioCtx.currentTime;
+    ctx.resume().catch(() => {});
+    const t0 = ctx.currentTime + 0.02;
     for (let i = 0; i < times; i++) {
-      const o = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
       o.type = 'square';
       o.frequency.value = freq;
       g.gain.setValueAtTime(0.0001, t0 + i * gap);
       g.gain.exponentialRampToValueAtTime(0.6, t0 + i * gap + 0.01);
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + i * gap + gap * 0.8);
-      o.connect(g).connect(audioCtx.destination);
+      o.connect(g).connect(ctx.destination);
       o.start(t0 + i * gap);
       o.stop(t0 + i * gap + gap);
     }
-  } catch {}
+    const ms = Math.round(times * gap * 1000) + 60;
+    releaseAudioLater(ms + 4000); // margen para la voz que viene detrás
+    return ms;
+  } catch {
+    return 0;
+  }
+}
+
+// ---------- Voz ----------
+function speak(text, delayMs = 0) {
+  if (settings.sound !== 'on' || settings.voice !== 'on' || !text) return;
+  setTimeout(() => {
+    if (NATIVE && Tts) {
+      Tts.speak({ text, lang: 'es-ES', rate: 1.0, pitch: 1.0, volume: 1.0, category: 'playback', queueStrategy: 0 }).catch((e) =>
+        console.warn('Voz no disponible', e),
+      );
+      return;
+    }
+    if (!('speechSynthesis' in window)) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'es-ES';
+    const voice = speechSynthesis.getVoices().find((v) => v.lang?.startsWith('es'));
+    if (voice) u.voice = voice;
+    speechSynthesis.speak(u);
+  }, delayMs);
+}
+
+function spokenDist(m) {
+  if (m >= 950) return `${(m / 1000).toFixed(1).replace('.', ' coma ').replace(' coma 0', '')} kilómetros`;
+  return `${Math.max(50, Math.round(m / 50) * 50)} metros`;
 }
 
 // ---------- Posición ----------
@@ -384,19 +437,39 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // ---------- Avisos de radar ----------
+const KIND = {
+  fixed: { title: 'RADAR FIJO', say: 'Radar fijo' },
+  mobile: { title: 'RADAR MÓVIL', say: 'Radar móvil' },
+  section_start: { title: 'INICIO DE TRAMO', say: 'Inicio de radar de tramo' },
+  section_end: { title: 'FIN DE TRAMO', say: 'Fin de radar de tramo' },
+};
+
+function alertMessage(cam, distance, level, over) {
+  const k = KIND[cam.type] ?? KIND.fixed;
+  const limit = cam.maxspeed ? ` de ${cam.maxspeed}` : '';
+  if (cam.type === 'section_end') return `${k.say} a ${spokenDist(distance)}.`;
+  if (level === 2 && over) return `${k.say}${limit} a ${spokenDist(distance)}. Reduce la velocidad.`;
+  return `${k.say}${limit} a ${spokenDist(distance)}.`;
+}
+
 function checkRadars() {
+  updateSection();
   if (settings.alerts !== 'on' || !state.pos) return hideAlert();
   const moving = state.speedKmh > 5;
-  const { ahead, level } = radars.check(state.pos, moving ? state.heading : null);
+  // El fin de un tramo solo se avisa si estás dentro de ese tramo (o si no sabemos dónde empezaste)
+  const skip = (c) => c.type === 'section_end' && state.section && state.section.id !== c.sectionId;
+  const { ahead, level } = radars.check(state.pos, moving ? state.heading : null, skip);
   if (!ahead) return hideAlert();
 
   const { cam, distance } = ahead;
+  const k = KIND[cam.type] ?? KIND.fixed;
   const el = $('#radar-alert');
   el.classList.remove('hidden');
   el.classList.toggle('near', distance <= ALERT_NEAR_M);
-  el.classList.toggle('mobile', !!cam.mobile);
-  el.querySelector('.ra-icon').style.backgroundImage = `url(${cam.mobile ? icons.mobile : icons.fixed})`;
-  el.querySelector('.ra-title').textContent = cam.mobile ? 'RADAR MÓVIL' : 'RADAR FIJO';
+  el.classList.toggle('mobile', cam.type === 'mobile');
+  el.classList.toggle('section', cam.type === 'section_start' || cam.type === 'section_end');
+  el.querySelector('.ra-icon').style.backgroundImage = `url(${icons[cam.type] ?? icons.fixed})`;
+  el.querySelector('.ra-title').textContent = k.title + (cam.road ? ` · ${cam.road}` : '');
   el.querySelector('.ra-dist').textContent = fmtDist(distance);
   const lim = el.querySelector('.ra-limit');
   lim.classList.toggle('hidden', !cam.maxspeed);
@@ -405,19 +478,62 @@ function checkRadars() {
   const over = cam.maxspeed && state.speedKmh > cam.maxspeed + 2;
   $('#speed').classList.toggle('over', !!over);
 
-  if (level === 1) {
-    beep(2, 880);
-    navigator.vibrate?.([150, 80, 150]);
-  } else if (level === 2) {
-    beep(over ? 5 : 3, over ? 1500 : 1200, 0.11);
-    navigator.vibrate?.(over ? [300, 100, 300, 100, 300] : [200, 80, 200]);
-  }
   if (level) {
-    const kind = cam.mobile ? 'Radar móvil' : 'Radar fijo';
-    const limit = cam.maxspeed ? ` · límite ${cam.maxspeed} km/h` : '';
-    notifyRadar(`⚠️ ${kind} a ${fmtDist(distance)}`, over ? `¡Vas a ${Math.round(state.speedKmh)} km/h!${limit}` : `Atención${limit}`);
+    const ms = level === 1 ? beep(2, 880) : beep(over ? 5 : 3, over ? 1500 : 1200, 0.11);
+    navigator.vibrate?.(level === 1 ? [150, 80, 150] : over ? [300, 100, 300, 100, 300] : [200, 80, 200]);
+    const msg = alertMessage(cam, distance, level, over);
+    speak(msg, ms);
+    notifyRadar(`⚠️ ${k.title.charAt(0) + k.title.slice(1).toLowerCase()} a ${fmtDist(distance)}`, msg);
   }
   state.alert = cam.id;
+}
+
+// ---------- Tramo: velocidad media ----------
+function updateSection() {
+  if (!state.pos) return;
+  const now = Date.now();
+  const sec = state.section;
+
+  if (!sec) {
+    const start = radars.sectionStartAt(state.pos, state.speedKmh > 5 ? state.heading : null);
+    if (start && state.lastSectionId !== start.sectionId) {
+      state.section = { id: start.sectionId, maxspeed: start.maxspeed, end: start.end, length: start.length, t0: now, dist: 0, last: state.pos, warned: false, minToEnd: Infinity };
+      state.lastSectionId = start.sectionId;
+      speak(start.maxspeed ? `Entras en el tramo. Límite ${start.maxspeed}.` : 'Entras en el tramo de radar.');
+    }
+    return renderSection();
+  }
+
+  sec.dist += distanceM(sec.last, state.pos);
+  sec.last = state.pos;
+  const hours = (now - sec.t0) / 3600000;
+  sec.avg = hours > 0.0008 ? sec.dist / 1000 / hours : state.speedKmh;
+
+  if (sec.maxspeed && sec.avg > sec.maxspeed + 2 && sec.dist > 300 && !sec.warned) {
+    sec.warned = true;
+    speak(`Atención: tu velocidad media es ${Math.round(sec.avg)}, por encima de ${sec.maxspeed}.`);
+  }
+  if (sec.maxspeed && sec.avg <= sec.maxspeed) sec.warned = false;
+
+  // Fin: al pasar por el punto final (o si nos alejamos de él tras acercarnos, o tras recorrer de más)
+  const toEnd = sec.end ? distanceM(state.pos, sec.end) : Infinity;
+  sec.minToEnd = Math.min(sec.minToEnd, toEnd);
+  const passed = toEnd < 40 || (sec.minToEnd < 250 && toEnd > sec.minToEnd + 80);
+  if (passed || sec.dist > sec.length * 1.6 + 2000 || now - sec.t0 > 60 * 60000) {
+    speak(`Fin del tramo. Velocidad media ${Math.round(sec.avg ?? 0)}.`);
+    state.section = null;
+  }
+  renderSection();
+}
+
+function renderSection() {
+  const el = $('#section-hud');
+  const sec = state.section;
+  if (!sec) return el.classList.add('hidden');
+  el.classList.remove('hidden');
+  const avg = Math.round(sec.avg ?? 0);
+  el.classList.toggle('over', !!(sec.maxspeed && avg > sec.maxspeed));
+  el.innerHTML = `<span>TRAMO${sec.maxspeed ? ` ${sec.maxspeed}` : ''}</span><b>MEDIA ${avg}</b><small>km/h</small>`;
 }
 
 function hideAlert() {
@@ -426,7 +542,12 @@ function hideAlert() {
   state.alert = null;
 }
 
-const icons = { fixed: blipDataURL('b-camera'), mobile: blipDataURL('b-camera-mobile') };
+const icons = {
+  fixed: blipDataURL('b-camera'),
+  mobile: blipDataURL('b-camera-mobile'),
+  section_start: blipDataURL('b-camera-section'),
+  section_end: blipDataURL('b-camera-section'),
+};
 
 $('#btn-report').addEventListener('click', async () => {
   if (!state.pos) return;
@@ -534,7 +655,20 @@ function setWaypoint(lngLat, label = '') {
   wpMarker.setLngLat(lngLat).addTo(map);
   $('#btn-clear-wp').classList.remove('hidden');
   $('#btn-save-place').classList.remove('hidden');
-  fetchRoute(true);
+  // La cámara enseña ya dónde estás y a dónde vas; cuando llegue la ruta se ajusta a ella entera
+  showTrip([state.anim.disp ?? state.pos, lngLat].filter(Boolean));
+  fetchRoute(true, true);
+}
+
+// Encuadra unos puntos en el modo mapa (en el modo radar la cámara sigue a la flecha)
+function showTrip(points) {
+  if (state.mode !== 'map' || !points.length) return;
+  if (points.length === 1) return map.easeTo({ center: points[0], zoom: 15, duration: 600 });
+  const b = new maplibregl.LngLatBounds();
+  points.forEach((p) => b.extend(p));
+  const top = ($('#pause-header')?.offsetHeight ?? 140) + 30;
+  const bottom = ($('#pause-footer')?.offsetHeight ?? 120) + 30;
+  map.fitBounds(b, { padding: { top, bottom, left: 50, right: 50 }, maxZoom: 16, duration: 700 });
 }
 
 function clearWaypoint() {
@@ -551,11 +685,17 @@ function clearWaypoint() {
   $('#wp-distance').classList.add('hidden');
 }
 
-async function fetchRoute(fit = false) {
-  if (!state.pos || !state.waypoint || state.routing) return;
+async function fetchRoute(fit = false, force = false) {
+  if (!state.pos || !state.waypoint) return;
+  // Si ya se está calculando otra ruta, esta se hace justo después (antes se perdía y la cámara no se movía)
+  if (state.routing) {
+    if (force) state.pendingRoute = { fit };
+    return;
+  }
   state.routing = true;
   state.lastReroute = Date.now();
-  const coords = `${state.pos[0]},${state.pos[1]};${state.waypoint[0]},${state.waypoint[1]}`;
+  const target = state.waypoint;
+  const coords = `${state.pos[0]},${state.pos[1]};${target[0]},${target[1]}`;
   const base = settings.profile === 'foot' ? 'routed-foot' : 'routed-car';
   const urls = [
     `https://routing.openstreetmap.de/${base}/route/v1/driving/${coords}?overview=full&geometries=geojson`,
@@ -576,6 +716,7 @@ async function fetchRoute(fit = false) {
       } catch {}
     }
     if (!route) throw new Error('sin ruta');
+    if (state.waypoint !== target) return; // el destino cambió mientras tanto; la nueva ruta va en camino
     const c = route.geometry.coordinates;
     const cum = [0];
     for (let i = 1; i < c.length; i++) cum.push(cum[i - 1] + distanceM(c[i - 1], c[i]));
@@ -585,16 +726,15 @@ async function fetchRoute(fit = false) {
     state.tripTotal = Math.max(state.tripTotal, cum[cum.length - 1]);
     setRouteData();
     if (state.demo) $('#btn-sim').classList.remove('hidden');
-    if (fit && state.mode === 'map') {
-      const b = new maplibregl.LngLatBounds();
-      c.forEach((pt) => b.extend(pt));
-      map.fitBounds(b, { padding: { top: 140, bottom: 160, left: 40, right: 40 }, duration: 800 });
-    }
+    if (fit) showTrip(c);
     updateRouteProgress();
   } catch {
     toast('No se pudo calcular la ruta');
   } finally {
     state.routing = false;
+    const pending = state.pendingRoute;
+    state.pendingRoute = null;
+    if (pending) fetchRoute(pending.fit, true);
   }
 }
 
@@ -675,11 +815,21 @@ function stopSim() {
 $('#btn-sim').addEventListener('click', startSim);
 
 // ---------- Modo mapa (menú de pausa) ----------
+// Nombres de barrios solo en el modo mapa (si el mapa aún está cargando, se aplica al terminar)
+function setPlaceLabels(visible) {
+  const apply = () => map.setLayoutProperty('place-label', 'visibility', state.mode === 'map' ? 'visible' : 'none');
+  try {
+    apply();
+  } catch {
+    map.once('load', apply);
+  }
+}
+
 function openMap() {
   state.mode = 'map';
   document.body.classList.replace('mode-radar', 'mode-map');
   setInteractive(true);
-  map.setLayoutProperty('place-label', 'visibility', 'visible');
+  setPlaceLabels(true);
   map.easeTo({
     center: state.anim.disp ?? state.pos ?? map.getCenter(),
     zoom: 14,
@@ -695,7 +845,7 @@ function closeMap() {
   state.mode = 'radar';
   document.body.classList.replace('mode-map', 'mode-radar');
   setInteractive(false);
-  map.setLayoutProperty('place-label', 'visibility', 'none');
+  setPlaceLabels(false);
   const anim = state.anim;
   if (!anim.disp) return;
   // Transición suave de vuelta a la vista de radar; luego el bucle de animación toma el control
@@ -730,7 +880,7 @@ map.on('click', (e) => {
     { layers: ['cameras'] },
   )[0];
   if (cam) {
-    const { id, mobile, maxspeed } = cam.properties;
+    const { id, mobile, maxspeed, kind } = cam.properties;
     if (mobile) {
       const mine = radars.isMine(id);
       const msg = mine ? '¿Quitar tu radar móvil para todos?' : '¿Este radar móvil ya no está? (con 3 avisos se quita para todos)';
@@ -741,7 +891,8 @@ map.on('click', (e) => {
           .catch((err) => toast(`No se pudo enviar: ${err.message}`));
       }
     } else {
-      toast(`Radar fijo${maxspeed ? ` · límite ${maxspeed} km/h` : ''}`);
+      const name = { section_start: 'Inicio de tramo', section_end: 'Fin de tramo' }[kind] ?? 'Radar fijo';
+      toast(`${name}${maxspeed ? ` · límite ${maxspeed} km/h` : ' · límite desconocido'}`);
     }
     return;
   }
@@ -850,7 +1001,6 @@ async function openShared(text) {
   const pos = await parseSharedLocation(text);
   if (!pos) return showResults('<li class="sr-msg">No encuentro una ubicación en ese texto. Copia el enlace de la ubicación y vuelve a probar.</li>');
   goTo(pos, '');
-  map.easeTo({ center: pos, zoom: 15, duration: 600 });
   toast('Ubicación compartida marcada como destino');
 }
 
@@ -1021,9 +1171,11 @@ bindSeg('#seg-alerts', 'alerts', checkRadars);
 bindSeg('#seg-sound', 'sound');
 $('#btn-test-sound').addEventListener('click', () => {
   if (settings.sound !== 'on') return toast('Activa el sonido primero');
-  beep(3, 1200, 0.11);
+  const ms = beep(3, 1200, 0.11);
   navigator.vibrate?.([200, 80, 200]);
+  speak('Inicio de radar de tramo de 100 a 500 metros.', ms);
 });
+bindSeg('#seg-voice', 'voice');
 
 // ---------- Mantener la pantalla encendida ----------
 let wakeLock;
@@ -1040,7 +1192,17 @@ $('#btn-start').addEventListener('click', async () => {
     if (typeof DeviceOrientationEvent?.requestPermission === 'function') await DeviceOrientationEvent.requestPermission();
   } catch {}
   try {
-    await initAudio().resume();
+    // iOS solo deja sonar audio web si se "desbloquea" con un toque; se suelta enseguida para no tocar tu música
+    const ctx = initAudio();
+    if (ctx) {
+      await ctx.resume();
+      const b = ctx.createBufferSource();
+      b.buffer = ctx.createBuffer(1, 1, 22050);
+      b.connect(ctx.destination);
+      b.start();
+      releaseAudioLater(300);
+    }
+    if ('speechSynthesis' in window) speechSynthesis.getVoices();
   } catch {}
   $('#start').remove();
   if (NATIVE) Notif.requestPermissions().catch(() => {});

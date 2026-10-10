@@ -42,6 +42,7 @@ jobs:
           $PB -c "Add :NSLocationAlwaysAndWhenInUseUsageDescription string 'Radar usa tu ubicación con la pantalla bloqueada para seguir avisándote de los radares.'" $PLIST
           $PB -c "Add :UIBackgroundModes array" $PLIST
           $PB -c "Add :UIBackgroundModes:0 string location" $PLIST
+          $PB -c "Add :UIBackgroundModes:1 string audio" $PLIST
           $PB -c "Set :CFBundleDisplayName Radar" $PLIST || $PB -c "Add :CFBundleDisplayName string Radar" $PLIST
           for f in ios/App/App/Assets.xcassets/AppIcon.appiconset/*.png; do cp resources/icon-1024.png "$f"; done
           cat $PLIST

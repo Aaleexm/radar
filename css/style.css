@@ -425,3 +425,24 @@ button { font: inherit; color: inherit; border: 0; background: none; cursor: poi
 .search-row { display: flex; gap: 6px; }
 .search-row #search { flex: 1; min-width: 0; width: auto; }
 .search-row .pill { flex: none; padding: 0 14px; }
+
+/* Tramo: velocidad media */
+#radar-alert.section { border-left-color: #2f80ed; }
+#section-hud {
+  position: absolute;
+  top: calc(150px + var(--safe-top));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 14px;
+  background: rgba(0, 0, 0, 0.8);
+  border-left: 5px solid #2f80ed;
+  text-shadow: var(--hud-shadow);
+}
+#section-hud span { font-size: 13px; letter-spacing: 1.5px; color: #9cc3ff; }
+#section-hud b { font-size: 22px; }
+#section-hud small { font-size: 12px; color: #ccc; }
+#section-hud.over { border-left-color: var(--danger); }
+#section-hud.over b { color: var(--danger); animation: blink 0.6s steps(2) infinite; }

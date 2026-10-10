@@ -39,6 +39,8 @@
       <div class="ra-limit hidden">50</div>
     </div>
 
+    <div id="section-hud" class="hidden"></div>
+
     <div id="hud-bottom">
       <div id="location">
         <div id="area-name"></div>
@@ -100,10 +102,17 @@
         </div>
       </div>
       <div class="setting">
+        <span>Voz en los avisos</span>
+        <div class="seg" id="seg-voice">
+          <button data-v="on">SÍ</button>
+          <button data-v="off">NO</button>
+        </div>
+      </div>
+      <div class="setting">
         <span>Probar aviso</span>
         <button id="btn-test-sound" class="pill">SONAR</button>
       </div>
-      <p class="note">Radares fijos: OpenStreetMap. Radares móviles: compartidos por todos los usuarios (caducan a las 3 h; se renuevan si alguien los confirma).<br />Mapa © OpenStreetMap · OpenFreeMap</p>
+      <p class="note">Radares fijos y de tramo: DGT (datos oficiales) y OpenStreetMap. Radares móviles: compartidos por todos los usuarios (caducan a las 3 h; se renuevan si alguien los confirma).<br />Mapa © OpenStreetMap · OpenFreeMap</p>
     </section>
 
     <footer id="pause-footer">

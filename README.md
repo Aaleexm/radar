@@ -6,7 +6,9 @@ Es una web app instalable (PWA): sin compilación, sin claves de API.
 ## Qué hace
 - **Modo radar**: el mapa te sigue, gira con tu rumbo y se aleja según la velocidad. Muestra la zona, la calle, la velocidad, la hora, el blip del norte y la barra verde/azul (batería / señal GPS).
 - **Modo mapa** (botón MAPA): toca para marcar destino → ruta morada (coche o a pie). Leyenda y ajustes.
-- **Radares**: los fijos se descargan de OpenStreetMap en 25 km a tu alrededor. Avisa a 500 m y a 150 m (pitido + vibración) si el radar está por delante, y pone la velocidad en rojo si superas el límite.
+- **Radares**: fijos y de tramo de la **DGT** (datos oficiales, `/api/dgt`, sin Cataluña ni País Vasco) y de **OpenStreetMap**, en 25 km a tu alrededor. Avisa a 500 m y a 150 m con pitido y **voz** («Radar fijo de 50 a 500 metros», «Inicio de radar de tramo…», «Fin de radar de tramo…») si el radar está por delante y en tu sentido.
+- **Tramos**: al pasar el inicio mide tu **velocidad media** y avisa si supera el límite; al final dice la media. La DGT no publica límites: se toman de OpenStreetMap cuando existen.
+- **Audio**: no pausa tu música; la baja mientras suena el aviso.
 - **+ RADAR**: reporta un radar móvil en tu posición y **se comparte con todos los usuarios** (Supabase, proyecto `radar`). Caduca a las 3 h; si otro usuario lo reporta a menos de 100 m se confirma y se alarga. En el mapa, tócalo para decir «ya no está»: si es tuyo desaparece al momento; si no, con 3 avisos de dispositivos distintos.
 - Límite anti-spam: 10 reportes por dispositivo y hora. Las tablas no son accesibles desde fuera, solo las funciones `radars_near`, `report_radar` y `dismiss_radar`.
 - **Modo demo** (sin GPS): mantén pulsado en el mapa para moverte y usa SIMULAR para recorrer la ruta.

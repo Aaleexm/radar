@@ -169,6 +169,7 @@ const DRAW = {
     }),
   'b-camera': () => cameraBlip('#ff3b30'),
   'b-camera-mobile': () => cameraBlip('#ffb020'),
+  'b-camera-section': () => cameraBlip('#2f80ed'),
   'b-pharmacy': () =>
     blip((ctx) => {
       ctx.beginPath();
@@ -180,6 +181,7 @@ const DRAW = {
 export const LEGEND = [
   ['b-camera', 'Radar fijo'],
   ['b-camera-mobile', 'Radar móvil (de la comunidad)'],
+  ['b-camera-section', 'Radar de tramo (inicio y fin)'],
   ['b-fuel', 'Gasolinera'],
   ['b-hospital', 'Hospital'],
   ['b-police', 'Policía'],
