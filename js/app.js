@@ -55,6 +55,10 @@ const state = {
   sim: null,
   alert: null,
   anim: { from: null, to: null, disp: null, t0: 0, dur: 0, lastFix: 0, heading: null, zoom: null, transitionUntil: 0, force: false },
+  follow: true, // la cámara sigue a la flecha
+  gesture: false, // el usuario está tocando el mapa
+  userZoom: 0, // zoom extra elegido con los dedos o con + / −
+  recenterTimer: null,
 };
 
 // ---------- Mapa ----------
@@ -70,18 +74,23 @@ const map = new maplibregl.Map({
   pixelRatio: Math.min(window.devicePixelRatio || 1, 2), // en pantallas 3x renderizar a 2x va mucho más suelto
 });
 registerBlipImages(map);
+if (location.hostname === 'localhost') window.__map = map; // solo para pruebas en local
 setInteractive(false);
 map.setPadding(radarPadding());
 window.addEventListener('resize', () => state.mode === 'radar' && map.setPadding(radarPadding()));
 
-function setInteractive(on) {
-  const handlers = ['dragPan', 'scrollZoom', 'touchZoomRotate', 'doubleClickZoom'];
-  for (const h of handlers) on ? map[h].enable() : map[h].disable();
+function setInteractive(mapMode) {
+  for (const h of ['dragPan', 'scrollZoom', 'touchZoomRotate', 'doubleClickZoom']) map[h].enable();
   map.dragRotate.disable();
   map.keyboard.disable();
   map.touchPitch.disable();
   map.boxZoom.disable();
-  if (on) map.touchZoomRotate.disableRotation();
+  map.touchZoomRotate.disableRotation();
+  // En conducción el zoom se hace alrededor de tu flecha, no de donde pongas los dedos
+  const around = mapMode ? undefined : 'center';
+  map.scrollZoom.enable(around ? { around } : undefined);
+  map.touchZoomRotate.enable(around ? { around } : undefined);
+  map.touchZoomRotate.disableRotation();
 }
 
 // Jugador: flecha blanca de GTA
@@ -429,7 +438,7 @@ function frame(now) {
     step = Math.max(-maxStep, Math.min(maxStep, step));
     anim.heading = (anim.heading + step + 360) % 360;
   }
-  const zoomTarget = radarZoom();
+  const zoomTarget = radarZoom() + state.userZoom;
   const prevZoom = anim.zoom;
   anim.zoom = anim.zoom == null ? zoomTarget : anim.zoom + (zoomTarget - anim.zoom) * (1 - Math.exp(-dt / 900));
 
@@ -442,7 +451,7 @@ function frame(now) {
 
   playerMarker.setLngLat(disp);
   if (state.heading != null) playerMarker.setRotation(anim.heading);
-  if (state.mode === 'radar' && !inTransition) {
+  if (state.mode === 'radar' && state.follow && !state.gesture && !inTransition) {
     map.jumpTo({ center: disp, bearing: anim.heading, zoom: anim.zoom, pitch: 55 });
   }
   anim.force = false;
@@ -878,8 +887,16 @@ function closeMap() {
   document.body.classList.replace('mode-map', 'mode-radar');
   setInteractive(false);
   setPlaceLabels(false);
+  recenter();
+}
+
+function recenter() {
+  state.follow = true;
+  state.gesture = false;
+  clearTimeout(state.recenterTimer);
+  $('#btn-recenter').classList.add('hidden');
   const anim = state.anim;
-  if (!anim.disp) return;
+  if (!anim.disp || state.mode !== 'radar') return;
   // Transición suave de vuelta a la vista de radar; pasado ese tiempo el bucle de animación retoma el control
   // pase lo que pase (antes esperaba un evento que, si la animación se cortaba, no llegaba nunca)
   clearTimeout(state.autoReturn);
@@ -896,6 +913,53 @@ function closeMap() {
 }
 
 $('#btn-open-map').addEventListener('click', openMap);
+
+// ---------- Zoom y "mirar alrededor" en conducción ----------
+const MIN_USER_ZOOM = -5;
+const MAX_USER_ZOOM = 3;
+function setUserZoom(z) {
+  state.userZoom = Math.max(MIN_USER_ZOOM, Math.min(MAX_USER_ZOOM, z));
+  state.anim.force = true;
+}
+
+function stopFollowing() {
+  if (state.mode !== 'radar') return;
+  state.follow = false;
+  $('#btn-recenter').classList.remove('hidden');
+  armAutoRecenter();
+}
+
+// Si no tocas nada en 15 s, la cámara vuelve sola a seguirte
+function armAutoRecenter() {
+  clearTimeout(state.recenterTimer);
+  state.recenterTimer = setTimeout(() => !state.follow && state.mode === 'radar' && recenter(), 15000);
+}
+
+map.on('zoomstart', (e) => {
+  if (e.originalEvent && state.mode === 'radar') state.gesture = true;
+});
+map.on('zoomend', (e) => {
+  if (!e.originalEvent || state.mode !== 'radar') return;
+  state.gesture = false;
+  // Lo que el usuario ha ampliado o alejado se guarda como zoom extra
+  setUserZoom(map.getZoom() - radarZoom());
+  state.anim.zoom = map.getZoom();
+  if (!state.follow) armAutoRecenter();
+});
+map.on('dragstart', (e) => {
+  if (e.originalEvent && state.mode === 'radar') stopFollowing();
+});
+map.on('dragend', () => !state.follow && armAutoRecenter());
+
+$('#btn-zoom-in').addEventListener('click', () => {
+  setUserZoom(state.userZoom + 1);
+  if (!state.follow) map.zoomIn();
+});
+$('#btn-zoom-out').addEventListener('click', () => {
+  setUserZoom(state.userZoom - 1);
+  if (!state.follow) map.zoomOut();
+});
+$('#btn-recenter').addEventListener('click', recenter);
 $('#pause').addEventListener('pointerdown', cancelAutoReturn);
 ['dragstart', 'zoomstart'].forEach((ev) => map.on(ev, (e) => e.originalEvent && cancelAutoReturn()));
 $('#btn-close-map').addEventListener('click', closeMap);
