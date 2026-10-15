@@ -1,0 +1,6 @@
+{
+  "functions": {
+    "api/osm.js": { "maxDuration": 60 },
+    "api/dgt.js": { "maxDuration": 30 }
+  }
+}

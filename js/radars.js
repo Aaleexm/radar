@@ -90,7 +90,16 @@ async function rpc(fn, args) {
 }
 
 // ---------- Fuentes ----------
-async function fetchOsm([lon, lat]) {
+// Primero el intermediario de la app (caché por zonas en Vercel); si no responde, Overpass directamente
+async function fetchOsmElements([lon, lat]) {
+  try {
+    const res = await fetch(`${API_BASE}/api/osm?lat=${lat.toFixed(3)}&lon=${lon.toFixed(3)}`);
+    if (res.ok) return (await res.json()).elements;
+  } catch {}
+  return fetchOverpassDirect([lon, lat]);
+}
+
+async function fetchOverpassDirect([lon, lat]) {
   const dLat = FETCH_RADIUS_KM / 111;
   const dLon = dLat / Math.cos((lat * Math.PI) / 180);
   const bbox = `${lat - dLat},${lon - dLon},${lat + dLat},${lon + dLon}`;
@@ -115,14 +124,20 @@ out skel qt;`;
     } catch {}
   }
   if (!data) throw new Error('Overpass no responde');
+  return data.elements;
+}
+
+async function fetchOsm(center) {
+  const elements = await fetchOsmElements(center);
+  const near = (el) => distanceM(center, [el.lon, el.lat]) < FETCH_RADIUS_KM * 1000 * 1.2;
 
   const nodes = new Map();
-  for (const el of data.elements) if (el.type === 'node') nodes.set(el.id, el);
+  for (const el of elements) if (el.type === 'node') nodes.set(el.id, el);
 
   const relSpeed = new Map(); // device -> límite (relaciones de velocidad puntual)
   const sectionDevices = new Set();
   const sections = [];
-  for (const el of data.elements) {
+  for (const el of elements) {
     if (el.type !== 'relation') continue;
     const speed = parseSpeed(el.tags?.maxspeed);
     const members = (el.members ?? []).filter((m) => m.type === 'node' && nodes.has(m.ref));
@@ -142,7 +157,7 @@ out skel qt;`;
 
   const fixed = [];
   for (const el of nodes.values()) {
-    if (el.tags?.highway !== 'speed_camera' || sectionDevices.has(el.id)) continue;
+    if (el.tags?.highway !== 'speed_camera' || sectionDevices.has(el.id) || !near(el)) continue;
     fixed.push({ id: `osm-${el.id}`, pos: [el.lon, el.lat], maxspeed: parseSpeed(el.tags?.maxspeed) ?? relSpeed.get(el.id) ?? null });
   }
   return { fixed, sections };
@@ -245,7 +260,8 @@ export class Radars {
 
   async ensureLoaded(pos) {
     if (this.loading) return;
-    if (this.fetchCenter && distanceM(pos, this.fetchCenter) < REFETCH_KM * 1000) return;
+    const retryDue = this.retryAt && Date.now() > this.retryAt;
+    if (!retryDue && this.fetchCenter && distanceM(pos, this.fetchCenter) < REFETCH_KM * 1000) return;
     this.loading = true;
     try {
       // Las dos fuentes en paralelo; si una falla, se usa la otra
@@ -254,11 +270,14 @@ export class Radars {
       const empty = { fixed: [], sections: [] };
       this.fixed = merge(osm.value ?? empty, dgt.value ?? empty);
       this.sources = [osm.status === 'fulfilled' && 'OpenStreetMap', dgt.status === 'fulfilled' && 'DGT'].filter(Boolean);
+      // Si una fuente falló, se vuelve a intentar en 2 minutos aunque no te hayas movido
+      this.retryAt = this.sources.length < 2 ? Date.now() + 2 * 60 * 1000 : null;
       this.fetchCenter = pos;
       saveJSON(LS_FIXED, { center: pos, cameras: this.fixed, sources: this.sources });
       this.onChange();
     } catch (err) {
       console.warn('No se pudieron cargar los radares', err);
+      this.retryAt = Date.now() + 60 * 1000;
     } finally {
       this.loading = false;
     }
