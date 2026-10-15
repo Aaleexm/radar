@@ -54,16 +54,29 @@ function describe(props) {
   return [...new Set(parts.filter(Boolean))].filter((p) => p !== props.name).join(', ');
 }
 
-// Busca cerca de donde estás primero (sesgo por posición)
-export async function searchPlaces(query, near, signal) {
+// Petición con tiempo máximo: si el servicio no contesta, se pasa al de reserva
+async function fetchJson(url, signal, ms = 4000) {
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), ms);
+  const onAbort = () => timeout.abort();
+  signal?.addEventListener('abort', onAbort);
+  try {
+    const res = await fetch(url, { signal: timeout.signal, headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`Error ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+async function searchPhoton(query, near, signal) {
   const params = new URLSearchParams({ q: query, limit: '8', lang: 'default' });
   if (near) {
     params.set('lon', near[0].toFixed(5));
     params.set('lat', near[1].toFixed(5));
   }
-  const res = await fetch(`https://photon.komoot.io/api/?${params}`, { signal });
-  if (!res.ok) throw new Error(`Error ${res.status}`);
-  const data = await res.json();
+  const data = await fetchJson(`https://photon.komoot.io/api/?${params}`, signal);
   return data.features.map((f) => {
     const p = f.properties;
     const title = p.name || [p.street, p.housenumber].filter(Boolean).join(' ') || p.city || 'Sin nombre';
@@ -71,17 +84,56 @@ export async function searchPlaces(query, near, signal) {
   });
 }
 
+// Reserva: Nominatim (OpenStreetMap). Prioriza resultados cerca de ti con un recuadro de ~50 km.
+async function searchNominatim(query, near, signal) {
+  const params = new URLSearchParams({ format: 'jsonv2', q: query, limit: '8', 'accept-language': 'es', addressdetails: '1' });
+  if (near) {
+    const d = 0.45;
+    params.set('viewbox', `${near[0] - d},${near[1] + d},${near[0] + d},${near[1] - d}`);
+  }
+  const data = await fetchJson(`https://nominatim.openstreetmap.org/search?${params}`, signal, 6000);
+  return data.map((r) => {
+    const a = r.address ?? {};
+    const street = [a.road, a.house_number].filter(Boolean).join(' ');
+    const title = r.name || street || r.display_name.split(',')[0];
+    const subtitle = [street !== title ? street : '', a.suburb, a.city || a.town || a.village, a.state]
+      .filter(Boolean)
+      .filter((x, i, arr) => arr.indexOf(x) === i)
+      .join(', ');
+    return { title, subtitle, pos: [Number(r.lon), Number(r.lat)] };
+  });
+}
+
+// Busca cerca de donde estás primero; si el buscador principal falla o tarda, usa el de reserva
+export async function searchPlaces(query, near, signal) {
+  try {
+    return await searchPhoton(query, near, signal);
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return searchNominatim(query, near, signal);
+  }
+}
+
 // Dirección legible de un punto (para guardar un sitio tocado en el mapa)
 export async function reverseGeocode(pos) {
   try {
-    const res = await fetch(`https://photon.komoot.io/reverse?lon=${pos[0]}&lat=${pos[1]}&limit=1`);
-    const f = (await res.json()).features?.[0];
+    const f = (await fetchJson(`https://photon.komoot.io/reverse?lon=${pos[0]}&lat=${pos[1]}&limit=1`))?.features?.[0];
     if (!f) return '';
     const p = f.properties;
     const street = [p.street, p.housenumber].filter(Boolean).join(' ');
     return [p.name && p.name !== street ? p.name : '', street, p.city || p.town || p.village].filter(Boolean).join(', ');
   } catch {
-    return '';
+    try {
+      const r = await fetchJson(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lon=${pos[0]}&lat=${pos[1]}&accept-language=es`,
+        null,
+        6000,
+      );
+      const a = r.address ?? {};
+      return [r.name, [a.road, a.house_number].filter(Boolean).join(' '), a.city || a.town || a.village].filter(Boolean).join(', ');
+    } catch {
+      return '';
+    }
   }
 }
 

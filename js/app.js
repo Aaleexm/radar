@@ -54,7 +54,7 @@ const state = {
   lastReroute: 0,
   sim: null,
   alert: null,
-  anim: { from: null, to: null, disp: null, t0: 0, dur: 0, lastFix: 0, heading: null, zoom: null, transition: false, force: false },
+  anim: { from: null, to: null, disp: null, t0: 0, dur: 0, lastFix: 0, heading: null, zoom: null, transitionUntil: 0, force: false },
 };
 
 // ---------- Mapa ----------
@@ -175,33 +175,39 @@ function updateTripBar(remainingM = null, remainingS = null) {
 
 // ---------- Sonido / vibración ----------
 // Audio sin cortar tu música:
-//  - "transient" (Safari/iOS): la música de otras apps baja de volumen mientras suena el aviso y luego vuelve.
-//  - Al terminar cada aviso se suspende el audio para soltar el control y que la música recupere su volumen.
-//  - En la app nativa, si el sistema no ofrece este modo, no se usa el audio web (en iOS pausaría la música):
-//    avisa la voz nativa, que también baja el volumen de la música en vez de pararla.
+//  - El contexto de audio se desbloquea al pulsar EMPEZAR y se queda activo (en iPhone, si se suspende,
+//    no se puede volver a activar sin tocar la pantalla y los avisos dejarían de sonar).
+//  - Modo "ambient": suena mezclado con tu música, sin pausarla. Durante el aviso pasa a "transient",
+//    que baja el volumen de la música un momento, y luego vuelve a "ambient".
 let audioCtx;
-let audioIdle;
-function initAudio() {
-  if (NATIVE && !navigator.audioSession) return null;
+let duckTimer;
+function setSessionType(type) {
   try {
-    if (navigator.audioSession) navigator.audioSession.type = 'transient';
+    if (navigator.audioSession) navigator.audioSession.type = type;
   } catch {}
-  try {
-    audioCtx ??= new AudioContext();
-  } catch {
-    return null;
+}
+
+function initAudio() {
+  if (!audioCtx) {
+    setSessionType('ambient');
+    try {
+      audioCtx = new AudioContext();
+    } catch {
+      return null;
+    }
+    // Si iOS lo interrumpe (llamada, Siri…), se reactiva en cuanto se pueda
+    audioCtx.addEventListener('statechange', () => {
+      if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
+    });
   }
+  if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
   return audioCtx;
 }
 
-function releaseAudioLater(ms) {
-  clearTimeout(audioIdle);
-  audioIdle = setTimeout(() => {
-    audioCtx?.suspend().catch(() => {});
-    try {
-      if (navigator.audioSession) navigator.audioSession.type = 'auto';
-    } catch {}
-  }, ms);
+function duckMusicFor(ms) {
+  setSessionType('transient');
+  clearTimeout(duckTimer);
+  duckTimer = setTimeout(() => setSessionType('ambient'), ms);
 }
 
 // Devuelve cuánto dura (ms) para que la voz hable justo después del pitido
@@ -210,8 +216,9 @@ function beep(times, freq, gap = 0.16) {
   const ctx = initAudio();
   if (!ctx) return 0;
   try {
-    ctx.resume().catch(() => {});
-    const t0 = ctx.currentTime + 0.02;
+    const ms = Math.round(times * gap * 1000) + 60;
+    duckMusicFor(ms + 4500); // margen para la voz que viene detrás
+    const t0 = ctx.currentTime + 0.03;
     for (let i = 0; i < times; i++) {
       const o = ctx.createOscillator();
       const g = ctx.createGain();
@@ -224,8 +231,6 @@ function beep(times, freq, gap = 0.16) {
       o.start(t0 + i * gap);
       o.stop(t0 + i * gap + gap);
     }
-    const ms = Math.round(times * gap * 1000) + 60;
-    releaseAudioLater(ms + 4000); // margen para la voz que viene detrás
     return ms;
   } catch {
     return 0;
@@ -237,19 +242,24 @@ function speak(text, delayMs = 0) {
   if (settings.sound !== 'on' || settings.voice !== 'on' || !text) return;
   setTimeout(() => {
     if (NATIVE && Tts) {
-      Tts.speak({ text, lang: 'es-ES', rate: 1.0, pitch: 1.0, volume: 1.0, category: 'playback', queueStrategy: 0 }).catch((e) =>
-        console.warn('Voz no disponible', e),
-      );
+      Tts.speak({ text, lang: 'es-ES', rate: 1.0, pitch: 1.0, volume: 1.0, category: 'ambient', queueStrategy: 0 }).catch((e) => {
+        console.warn('Voz nativa no disponible, uso la del navegador', e);
+        webSpeak(text);
+      });
       return;
     }
-    if (!('speechSynthesis' in window)) return;
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'es-ES';
-    const voice = speechSynthesis.getVoices().find((v) => v.lang?.startsWith('es'));
-    if (voice) u.voice = voice;
-    speechSynthesis.speak(u);
+    webSpeak(text);
   }, delayMs);
+}
+
+function webSpeak(text) {
+  if (!('speechSynthesis' in window)) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'es-ES';
+  const voice = speechSynthesis.getVoices().find((v) => v.lang?.startsWith('es'));
+  if (voice) u.voice = voice;
+  speechSynthesis.speak(u);
 }
 
 function spokenDist(m) {
@@ -425,11 +435,14 @@ function frame(now) {
 
   const turned = prevHeading == null || Math.abs(((anim.heading - prevHeading + 540) % 360) - 180) > 0.01;
   const zoomed = prevZoom == null || Math.abs(anim.zoom - prevZoom) > 0.0005;
+  const inTransition = now < anim.transitionUntil;
+  if (anim.wasInTransition && !inTransition) anim.force = true; // al acabar la transición, retomar ya
+  anim.wasInTransition = inTransition;
   if (!moved && !turned && !zoomed && !anim.force) return; // nada que mover: no gastar batería
 
   playerMarker.setLngLat(disp);
   if (state.heading != null) playerMarker.setRotation(anim.heading);
-  if (state.mode === 'radar' && !anim.transition) {
+  if (state.mode === 'radar' && !inTransition) {
     map.jumpTo({ center: disp, bearing: anim.heading, zoom: anim.zoom, pitch: 55 });
   }
   anim.force = false;
@@ -658,6 +671,25 @@ function setWaypoint(lngLat, label = '') {
   // La cámara enseña ya dónde estás y a dónde vas; cuando llegue la ruta se ajusta a ella entera
   showTrip([state.anim.disp ?? state.pos, lngLat].filter(Boolean));
   fetchRoute(true, true);
+  scheduleAutoReturn();
+}
+
+// Tras elegir destino: se ve la ruta unos segundos y se vuelve sola a la vista de conducción,
+// salvo que toques algo del mapa o del menú en ese tiempo
+function scheduleAutoReturn() {
+  clearTimeout(state.autoReturn);
+  if (state.mode !== 'map') return;
+  toast('Ruta lista. Volviendo a la conducción… (toca para quedarte)', 3800);
+  state.autoReturn = setTimeout(() => {
+    if (state.mode === 'map' && $('#save-dialog').classList.contains('hidden')) closeMap();
+  }, 4000);
+}
+
+function cancelAutoReturn() {
+  if (!state.autoReturn) return;
+  clearTimeout(state.autoReturn);
+  state.autoReturn = null;
+  $('#toast').classList.add('hidden');
 }
 
 // Encuadra unos puntos en el modo mapa (en el modo radar la cámara sigue a la flecha)
@@ -848,8 +880,11 @@ function closeMap() {
   setPlaceLabels(false);
   const anim = state.anim;
   if (!anim.disp) return;
-  // Transición suave de vuelta a la vista de radar; luego el bucle de animación toma el control
-  anim.transition = true;
+  // Transición suave de vuelta a la vista de radar; pasado ese tiempo el bucle de animación retoma el control
+  // pase lo que pase (antes esperaba un evento que, si la animación se cortaba, no llegaba nunca)
+  clearTimeout(state.autoReturn);
+  map.stop();
+  anim.transitionUntil = performance.now() + 650;
   map.easeTo({
     center: anim.disp,
     bearing: anim.heading ?? 0,
@@ -858,13 +893,11 @@ function closeMap() {
     padding: radarPadding(),
     duration: 600,
   });
-  map.once('moveend', () => {
-    anim.transition = false;
-    anim.force = true;
-  });
 }
 
 $('#btn-open-map').addEventListener('click', openMap);
+$('#pause').addEventListener('pointerdown', cancelAutoReturn);
+['dragstart', 'zoomstart'].forEach((ev) => map.on(ev, (e) => e.originalEvent && cancelAutoReturn()));
 $('#btn-close-map').addEventListener('click', closeMap);
 $('#btn-center').addEventListener('click', () => state.pos && map.easeTo({ center: state.pos, zoom: 15.5, duration: 500 }));
 $('#btn-clear-wp').addEventListener('click', clearWaypoint);
@@ -1200,9 +1233,14 @@ $('#btn-start').addEventListener('click', async () => {
       b.buffer = ctx.createBuffer(1, 1, 22050);
       b.connect(ctx.destination);
       b.start();
-      releaseAudioLater(300);
     }
-    if ('speechSynthesis' in window) speechSynthesis.getVoices();
+    // iPhone solo deja hablar al navegador si la primera frase sale de un toque: una frase vacía basta
+    if ('speechSynthesis' in window) {
+      speechSynthesis.getVoices();
+      const u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      speechSynthesis.speak(u);
+    }
   } catch {}
   $('#start').remove();
   if (NATIVE) Notif.requestPermissions().catch(() => {});
