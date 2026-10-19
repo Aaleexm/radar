@@ -974,7 +974,7 @@ map.on('click', (e) => {
       [e.point.x - 14, e.point.y - 14],
       [e.point.x + 14, e.point.y + 14],
     ],
-    { layers: ['cameras'] },
+    { layers: ['cameras', 'cameras-far'] },
   )[0];
   if (cam) {
     const { id, mobile, maxspeed, kind } = cam.properties;

@@ -18,7 +18,7 @@ const LS_HIDDEN = 'radar.hidden';
 const SUPABASE_URL = 'https://xvxpkdnydlfcffppcosb.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_NtU2KhDU_hly8egjnEj3mA_FzkCaQL2';
 const MOBILE_SYNC_MS = 60 * 1000;
-const MOBILE_RADIUS_KM = 25;
+const MOBILE_RADIUS_KM = 1500; // toda la Península, Baleares y Canarias
 
 export const ALERT_FAR_M = 500;
 export const ALERT_NEAR_M = 150;
@@ -163,15 +163,18 @@ function inOsmFileArea([lon, lat]) {
 async function fetchOsm(center) {
   if (inOsmFileArea(center)) {
     try {
+      // Todos los radares de España (se ven en todo el mapa; para los avisos se mira la distancia en cada momento)
       const data = await loadOsmFile();
-      const near = (p) => distanceM(center, p) < FETCH_RADIUS_KM * 1000;
       return {
-        fixed: data.fixed
-          .filter(([lon, lat]) => near([lon, lat]))
-          .map(([lon, lat, maxspeed]) => ({ id: `osm-${lon},${lat}`, pos: [lon, lat], maxspeed: maxspeed ?? null })),
-        sections: data.sections
-          .filter((x) => near(x.from) || near(x.to))
-          .map((x) => ({ id: `osm-${x.from.join(',')}`, from: x.from, to: x.to, maxspeed: x.maxspeed ?? null, road: x.name ?? '' })),
+        fixed: data.fixed.map(([lon, lat, maxspeed]) => ({ id: `osm-${lon},${lat}`, pos: [lon, lat], maxspeed: maxspeed ?? null })),
+        sections: data.sections.map((x) => ({
+          id: `osm-${x.from.join(',')}`,
+          from: x.from,
+          to: x.to,
+          maxspeed: x.maxspeed ?? null,
+          road: x.name ?? '',
+        })),
+        complete: true,
       };
     } catch (err) {
       console.warn('Archivo de radares OSM no disponible, pruebo Overpass', err);
@@ -221,26 +224,41 @@ async function fetchDgt(center) {
   const res = await fetch(`${API_BASE}/api/dgt`);
   if (!res.ok) throw new Error(`DGT ${res.status}`);
   const data = await res.json();
-  const near = (p) => distanceM(center, p) < FETCH_RADIUS_KM * 1000;
   return {
-    fixed: data.fixed
-      .filter(([lon, lat]) => near([lon, lat]))
-      .map(([lon, lat, road]) => ({ id: `dgt-${lon},${lat}`, pos: [lon, lat], maxspeed: null, road })),
-    sections: data.sections
-      .filter((s) => near(s.from) || near(s.to))
-      .map((s) => ({ id: `dgt-${s.from.join(',')}`, from: s.from, to: s.to, maxspeed: null, road: s.road })),
+    fixed: data.fixed.map(([lon, lat, road]) => ({ id: `dgt-${lon},${lat}`, pos: [lon, lat], maxspeed: null, road })),
+    sections: data.sections.map((s) => ({ id: `dgt-${s.from.join(',')}`, from: s.from, to: s.to, maxspeed: null, road: s.road })),
   };
 }
 
 // Junta OSM y DGT sin duplicar: si coinciden en el mismo sitio, se queda uno y se aprovecha el límite de OSM
+// Rejilla de ~1 km para buscar radares cercanos sin comparar todos con todos
+function gridIndex(items, posOf) {
+  const cells = new Map();
+  for (const it of items) {
+    const [lon, lat] = posOf(it);
+    const k = `${Math.floor(lon * 100)},${Math.floor(lat * 100)}`;
+    if (!cells.has(k)) cells.set(k, []);
+    cells.get(k).push(it);
+  }
+  return (p) => {
+    const out = [];
+    const x = Math.floor(p[0] * 100);
+    const y = Math.floor(p[1] * 100);
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) out.push(...(cells.get(`${x + dx},${y + dy}`) ?? []));
+    return out;
+  };
+}
+
 function merge(osm, dgt) {
   const fixed = [...osm.fixed];
+  const nearOsm = gridIndex(osm.fixed, (o) => o.pos);
   for (const d of dgt.fixed) {
-    const twin = fixed.find((o) => distanceM(o.pos, d.pos) < 120);
+    const around = nearOsm(d.pos);
+    const twin = around.find((o) => distanceM(o.pos, d.pos) < 120);
     if (twin) twin.road ||= d.road;
     else {
       // Límite: el de un radar de OSM cercano si lo hay
-      const nearby = osm.fixed.find((o) => o.maxspeed && distanceM(o.pos, d.pos) < 300);
+      const nearby = around.find((o) => o.maxspeed && distanceM(o.pos, d.pos) < 300);
       fixed.push({ ...d, maxspeed: nearby?.maxspeed ?? null });
     }
   }
@@ -315,7 +333,8 @@ export class Radars {
   async ensureLoaded(pos) {
     if (this.loading) return;
     const retryDue = this.retryAt && Date.now() > this.retryAt;
-    if (!retryDue && this.fetchCenter && distanceM(pos, this.fetchCenter) < REFETCH_KM * 1000) return;
+    const fresh = this.complete && Date.now() - (this.loadedAt ?? 0) < 24 * 3600 * 1000;
+    if (!retryDue && this.fetchCenter && (fresh || distanceM(pos, this.fetchCenter) < REFETCH_KM * 1000)) return;
     this.loading = true;
     try {
       // Las dos fuentes en paralelo; si una falla, se usa la otra
@@ -323,6 +342,8 @@ export class Radars {
       if (osm.status === 'rejected' && dgt.status === 'rejected') throw osm.reason;
       const empty = { fixed: [], sections: [] };
       this.fixed = merge(osm.value ?? empty, dgt.value ?? empty);
+      this.complete = !!osm.value?.complete && dgt.status === 'fulfilled';
+      this.loadedAt = Date.now();
       this.sources = [osm.status === 'fulfilled' && 'OpenStreetMap', dgt.status === 'fulfilled' && 'DGT'].filter(Boolean);
       // Si una fuente falló, se vuelve a intentar en 2 minutos aunque no te hayas movido
       this.retryAt = this.sources.length < 2 ? Date.now() + 2 * 60 * 1000 : null;
