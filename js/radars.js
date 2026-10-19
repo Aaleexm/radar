@@ -127,7 +127,61 @@ out skel qt;`;
   return data.elements;
 }
 
+// ---------- OpenStreetMap: archivo semanal (España) ----------
+// GitHub Actions extrae cada semana todos los radares de España de OpenStreetMap (Geofabrik) a este archivo.
+// No depende de Overpass, que a menudo está saturado. Se guarda en el móvil y se renueva una vez al día.
+const OSM_FILE_URL = 'https://raw.githubusercontent.com/Aaleexm/radar/main/data/radares-osm.json';
+const LS_OSM_FILE = 'radar.osmFile';
+const OSM_FILE_AREA = { minLon: -18.5, maxLon: 4.6, minLat: 27.4, maxLat: 44.0 }; // España con Canarias y Baleares
+let osmFileMemo = null;
+
+async function loadOsmFile() {
+  if (osmFileMemo && Date.now() - osmFileMemo.t < 24 * 3600 * 1000) return osmFileMemo.data;
+  const cached = loadJSON(LS_OSM_FILE, null);
+  if (cached && Date.now() - cached.t < 24 * 3600 * 1000) {
+    osmFileMemo = cached;
+    return cached.data;
+  }
+  try {
+    const res = await fetch(OSM_FILE_URL);
+    if (!res.ok) throw new Error(`OSM ${res.status}`);
+    const data = await res.json();
+    osmFileMemo = { t: Date.now(), data };
+    saveJSON(LS_OSM_FILE, osmFileMemo);
+    return data;
+  } catch (err) {
+    if (cached) return cached.data; // sin conexión: la última copia, aunque sea antigua
+    throw err;
+  }
+}
+
+function inOsmFileArea([lon, lat]) {
+  const a = OSM_FILE_AREA;
+  return lon >= a.minLon && lon <= a.maxLon && lat >= a.minLat && lat <= a.maxLat;
+}
+
 async function fetchOsm(center) {
+  if (inOsmFileArea(center)) {
+    try {
+      const data = await loadOsmFile();
+      const near = (p) => distanceM(center, p) < FETCH_RADIUS_KM * 1000;
+      return {
+        fixed: data.fixed
+          .filter(([lon, lat]) => near([lon, lat]))
+          .map(([lon, lat, maxspeed]) => ({ id: `osm-${lon},${lat}`, pos: [lon, lat], maxspeed: maxspeed ?? null })),
+        sections: data.sections
+          .filter((x) => near(x.from) || near(x.to))
+          .map((x) => ({ id: `osm-${x.from.join(',')}`, from: x.from, to: x.to, maxspeed: x.maxspeed ?? null, road: x.name ?? '' })),
+      };
+    } catch (err) {
+      console.warn('Archivo de radares OSM no disponible, pruebo Overpass', err);
+    }
+  }
+  return fetchOsmLive(center);
+}
+
+// Fuera de España (o si el archivo falla): Overpass en directo, a través del intermediario con caché
+async function fetchOsmLive(center) {
   const elements = await fetchOsmElements(center);
   const near = (el) => distanceM(center, [el.lon, el.lat]) < FETCH_RADIUS_KM * 1000 * 1.2;
 

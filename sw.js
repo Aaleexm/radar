@@ -1,5 +1,5 @@
 // Cachea la app para que abra rápido y sin conexión (el mapa y los radares necesitan red).
-const CACHE = 'radar-v13';
+const CACHE = 'radar-v14';
 const SHELL = [
   './',
   'index.html',
