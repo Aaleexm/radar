@@ -19,6 +19,8 @@ const SUPABASE_URL = 'https://xvxpkdnydlfcffppcosb.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_NtU2KhDU_hly8egjnEj3mA_FzkCaQL2';
 const MOBILE_SYNC_MS = 60 * 1000;
 const MOBILE_RADIUS_KM = 1500; // toda la Península, Baleares y Canarias
+const HOTSPOTS_SYNC_MS = 30 * 60 * 1000;
+const LS_HOTSPOTS = 'radar.hotspots';
 
 export const ALERT_FAR_M = 500;
 export const ALERT_NEAR_M = 150;
@@ -135,24 +137,43 @@ const LS_OSM_FILE = 'radar.osmFile';
 const OSM_FILE_AREA = { minLon: -18.5, maxLon: 4.6, minLat: 27.4, maxLat: 44.0 }; // España con Canarias y Baleares
 let osmFileMemo = null;
 
-async function loadOsmFile() {
-  if (osmFileMemo && Date.now() - osmFileMemo.t < 24 * 3600 * 1000) return osmFileMemo.data;
-  const cached = loadJSON(LS_OSM_FILE, null);
+// Archivos de datos del repositorio: se guardan en el móvil y se renuevan una vez al día
+const fileMemo = {};
+async function loadRepoFile(url, lsKey) {
+  const memo = fileMemo[lsKey];
+  if (memo && Date.now() - memo.t < 24 * 3600 * 1000) return memo.data;
+  const cached = loadJSON(lsKey, null);
   if (cached && Date.now() - cached.t < 24 * 3600 * 1000) {
-    osmFileMemo = cached;
+    fileMemo[lsKey] = cached;
     return cached.data;
   }
   try {
-    const res = await fetch(OSM_FILE_URL);
-    if (!res.ok) throw new Error(`OSM ${res.status}`);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`${url} ${res.status}`);
     const data = await res.json();
-    osmFileMemo = { t: Date.now(), data };
-    saveJSON(LS_OSM_FILE, osmFileMemo);
+    fileMemo[lsKey] = { t: Date.now(), data };
+    saveJSON(lsKey, fileMemo[lsKey]);
     return data;
   } catch (err) {
     if (cached) return cached.data; // sin conexión: la última copia, aunque sea antigua
     throw err;
   }
+}
+
+const loadOsmFile = () => loadRepoFile(OSM_FILE_URL, LS_OSM_FILE);
+
+// ---------- Fuentes oficiales que no están en la lista de la DGT ----------
+// Servei Català de Trànsit, Ayuntamiento de Madrid y tramos INVIVE de la DGT (vigilancia intensiva: radares móviles)
+const OFFICIAL_FILE_URL = 'https://raw.githubusercontent.com/Aaleexm/radar/main/data/radares-oficiales.json';
+const LS_OFFICIAL_FILE = 'radar.officialFile';
+
+async function fetchOfficial() {
+  const data = await loadRepoFile(OFFICIAL_FILE_URL, LS_OFFICIAL_FILE);
+  return {
+    fixed: data.fixed.map(([lon, lat, maxspeed, road, source]) => ({ id: `of-${lon},${lat}`, pos: [lon, lat], maxspeed: maxspeed ?? null, road, source })),
+    sections: data.sections.map((x) => ({ id: `of-${x.from.join(',')}`, from: x.from, to: x.to, maxspeed: x.maxspeed ?? null, road: x.road ?? '', source: x.source })),
+    zones: data.zones ?? [],
+  };
 }
 
 function inOsmFileArea([lon, lat]) {
@@ -249,8 +270,16 @@ function gridIndex(items, posOf) {
   };
 }
 
-function merge(osm, dgt) {
-  const fixed = [...osm.fixed];
+function merge(osm, dgt, official = { fixed: [], sections: [], zones: [] }) {
+  // Primero los oficiales (Cataluña, Madrid), luego OSM sin repetir; si el oficial no trae límite, se usa el de OSM
+  const fixed = [...official.fixed];
+  const nearOfficial = gridIndex(official.fixed, (o) => o.pos);
+  for (const o of osm.fixed) {
+    const twin = nearOfficial(o.pos).find((f) => distanceM(f.pos, o.pos) < 80);
+    if (twin) twin.maxspeed ??= o.maxspeed;
+    else fixed.push(o);
+  }
+  osm = { ...osm, fixed, sections: [...official.sections, ...osm.sections.filter((s) => !official.sections.some((x) => distanceM(x.from, s.from) < 300))] };
   const nearOsm = gridIndex(osm.fixed, (o) => o.pos);
   for (const d of dgt.fixed) {
     const around = nearOsm(d.pos);
@@ -283,6 +312,11 @@ function merge(osm, dgt) {
     cams.push({ id: `${s.id}-a`, type: 'section_start', pos: s.from, maxspeed: s.maxspeed, road: s.road, sectionId: s.id, dir, length, end: s.to });
     cams.push({ id: `${s.id}-b`, type: 'section_end', pos: s.to, maxspeed: s.maxspeed, road: s.road, sectionId: s.id, dir, length });
   }
+  // Zonas INVIVE: se avisa al entrar por cualquiera de sus dos extremos (en ambos sentidos)
+  official.zones.forEach((z, i) => {
+    cams.push({ id: `zone-${i}-a`, type: 'zone', pos: z.from, road: z.road, dir: bearingDeg(z.from, z.to), maxspeed: null });
+    cams.push({ id: `zone-${i}-b`, type: 'zone', pos: z.to, road: z.road, dir: bearingDeg(z.to, z.from), maxspeed: null });
+  });
   return cams;
 }
 
@@ -294,6 +328,8 @@ export class Radars {
     this.fetchCenter = cache?.center ?? null;
     this.sources = cache?.sources ?? [];
     this.mobile = [];
+    this.hotspots = loadJSON(LS_HOTSPOTS, { t: 0, list: [] }).list;
+    this.hotspotsAt = 0;
     this.device = deviceId();
     this.mine = new Set(loadJSON(LS_MINE, []));
     this.hidden = new Set(loadJSON(LS_HIDDEN, []));
@@ -303,7 +339,29 @@ export class Radars {
   }
 
   all() {
-    return [...this.fixed, ...this.mobile];
+    return [...this.fixed, ...this.mobile, ...this.hotspots];
+  }
+
+  // Puntos habituales de radar móvil: sitios reportados muchas veces por la comunidad (historial)
+  async syncHotspots(pos) {
+    if (Date.now() - this.hotspotsAt < HOTSPOTS_SYNC_MS) return;
+    this.hotspotsAt = Date.now();
+    try {
+      const rows = await rpc('radar_hotspots', { p_lon: pos[0], p_lat: pos[1], p_radius_km: MOBILE_RADIUS_KM });
+      this.hotspots = rows.map((r) => ({
+        id: `hot-${r.lon.toFixed(4)},${r.lat.toFixed(4)}`,
+        type: 'hotspot',
+        pos: [r.lon, r.lat],
+        maxspeed: null,
+        reports: r.reports,
+        days: r.days,
+      }));
+      saveJSON(LS_HOTSPOTS, { t: Date.now(), list: this.hotspots });
+      this.onChange();
+    } catch (err) {
+      this.hotspotsAt = Date.now() - HOTSPOTS_SYNC_MS + 2 * 60 * 1000; // reintentar en 2 minutos
+      console.warn('No se pudieron cargar los puntos habituales', err);
+    }
   }
 
   geojson() {
@@ -321,7 +379,11 @@ export class Radars {
               ? `INICIO${c.maxspeed ? ` ${c.maxspeed}` : ''}`
               : c.type === 'section_end'
                 ? 'FIN'
-                : c.maxspeed
+                : c.type === 'zone'
+                  ? 'VIGILANCIA'
+                  : c.type === 'hotspot'
+                    ? `HABITUAL ×${c.reports}`
+                    : c.maxspeed
                   ? String(c.maxspeed)
                   : '',
           maxspeed: c.maxspeed ? String(c.maxspeed) : '',
@@ -338,15 +400,19 @@ export class Radars {
     this.loading = true;
     try {
       // Las dos fuentes en paralelo; si una falla, se usa la otra
-      const [osm, dgt] = await Promise.allSettled([fetchOsm(pos), fetchDgt(pos)]);
-      if (osm.status === 'rejected' && dgt.status === 'rejected') throw osm.reason;
-      const empty = { fixed: [], sections: [] };
-      this.fixed = merge(osm.value ?? empty, dgt.value ?? empty);
-      this.complete = !!osm.value?.complete && dgt.status === 'fulfilled';
+      const [osm, dgt, official] = await Promise.allSettled([fetchOsm(pos), fetchDgt(pos), fetchOfficial()]);
+      if (osm.status === 'rejected' && dgt.status === 'rejected' && official.status === 'rejected') throw osm.reason;
+      const empty = { fixed: [], sections: [], zones: [] };
+      this.fixed = merge(osm.value ?? empty, dgt.value ?? empty, official.value ?? empty);
+      this.complete = !!osm.value?.complete && dgt.status === 'fulfilled' && official.status === 'fulfilled';
       this.loadedAt = Date.now();
-      this.sources = [osm.status === 'fulfilled' && 'OpenStreetMap', dgt.status === 'fulfilled' && 'DGT'].filter(Boolean);
+      this.sources = [
+        osm.status === 'fulfilled' && 'OpenStreetMap',
+        dgt.status === 'fulfilled' && 'DGT',
+        official.status === 'fulfilled' && 'Oficiales (SCT, Madrid, INVIVE)',
+      ].filter(Boolean);
       // Si una fuente falló, se vuelve a intentar en 2 minutos aunque no te hayas movido
-      this.retryAt = this.sources.length < 2 ? Date.now() + 2 * 60 * 1000 : null;
+      this.retryAt = this.sources.length < 3 ? Date.now() + 2 * 60 * 1000 : null;
       this.fetchCenter = pos;
       saveJSON(LS_FIXED, { center: pos, cameras: this.fixed, sources: this.sources });
       this.onChange();
@@ -420,6 +486,7 @@ export class Radars {
         continue;
       }
       if (skip(cam)) continue;
+      if (cam.type === 'hotspot' && this.mobile.some((m) => distanceM(m.pos, cam.pos) < 200)) continue;
       if (heading != null) {
         // Solo los que quedan delante
         if (d > 30 && angleDiff(bearingDeg(pos, cam.pos), heading) > 50) continue;

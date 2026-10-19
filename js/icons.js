@@ -68,6 +68,40 @@ function cameraBlip(color) {
   return ctx.getImageData(0, 0, S, S);
 }
 
+// Zona de vigilancia: triángulo naranja de aviso con "!"
+function zoneBlip() {
+  const [c, ctx] = canvas();
+  ctx.beginPath();
+  ctx.moveTo(32, 6);
+  ctx.lineTo(59, 54);
+  ctx.lineTo(5, 54);
+  ctx.closePath();
+  ctx.fillStyle = '#ff9f1a';
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#000';
+  ctx.stroke();
+  ctx.fillStyle = '#000';
+  ctx.fillRect(29, 22, 6, 18);
+  ctx.fillRect(29, 44, 6, 6);
+  return ctx.getImageData(0, 0, S, S);
+}
+
+// Punto habitual: cámara naranja con anillo punteado (radar que suele aparecer aquí)
+function hotspotBlip() {
+  const data = cameraBlip('#ffb020');
+  const [c, ctx] = canvas();
+  ctx.putImageData(data, 0, 0);
+  ctx.globalCompositeOperation = 'destination-over';
+  ctx.setLineDash([6, 5]);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#ffb020';
+  ctx.beginPath();
+  ctx.arc(32, 32, 30, 0, Math.PI * 2);
+  ctx.stroke();
+  return ctx.getImageData(0, 0, S, S);
+}
+
 const DRAW = {
   'b-fuel': () =>
     blip((ctx) => {
@@ -170,6 +204,8 @@ const DRAW = {
   'b-camera': () => cameraBlip('#ff3b30'),
   'b-camera-mobile': () => cameraBlip('#ffb020'),
   'b-camera-section': () => cameraBlip('#2f80ed'),
+  'b-zone': () => zoneBlip(),
+  'b-hotspot': () => hotspotBlip(),
   'b-pharmacy': () =>
     blip((ctx) => {
       ctx.beginPath();
@@ -182,6 +218,8 @@ export const LEGEND = [
   ['b-camera', 'Radar fijo'],
   ['b-camera-mobile', 'Radar móvil (de la comunidad)'],
   ['b-camera-section', 'Radar de tramo (inicio y fin)'],
+  ['b-zone', 'Zona de vigilancia (DGT): posibles radares móviles'],
+  ['b-hotspot', 'Punto habitual de radar móvil (reportado muchas veces)'],
   ['b-fuel', 'Gasolinera'],
   ['b-hospital', 'Hospital'],
   ['b-police', 'Policía'],

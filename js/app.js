@@ -404,6 +404,7 @@ function onPosition(pos, { heading, speed, accuracy }) {
 
   radars.ensureLoaded(pos);
   radars.syncMobile(pos);
+  radars.syncHotspots(pos);
   checkRadars();
   updateRouteProgress();
   scheduleLocationNames();
@@ -464,12 +465,15 @@ const KIND = {
   mobile: { title: 'RADAR MÓVIL', say: 'Radar móvil' },
   section_start: { title: 'INICIO DE TRAMO', say: 'Inicio de radar de tramo' },
   section_end: { title: 'FIN DE TRAMO', say: 'Fin de radar de tramo' },
+  zone: { title: 'ZONA DE VIGILANCIA', say: 'Zona de vigilancia de radar móvil' },
+  hotspot: { title: 'PUNTO HABITUAL', say: 'Punto habitual de radar móvil' },
 };
 
 function alertMessage(cam, distance, level, over) {
   const k = KIND[cam.type] ?? KIND.fixed;
   const limit = cam.maxspeed ? ` de ${cam.maxspeed}` : '';
   if (cam.type === 'section_end') return `${k.say} a ${spokenDist(distance)}.`;
+  if (cam.type === 'zone') return `${k.say}${cam.road ? ` en la ${cam.road}` : ''} a ${spokenDist(distance)}.`;
   if (level === 2 && over) return `${k.say}${limit} a ${spokenDist(distance)}. Reduce la velocidad.`;
   return `${k.say}${limit} a ${spokenDist(distance)}.`;
 }
@@ -480,7 +484,11 @@ function checkRadars() {
   const moving = state.speedKmh > 5;
   // El fin de un tramo solo se avisa si estás dentro de ese tramo (o si no sabemos dónde empezaste)
   const skip = (c) => c.type === 'section_end' && state.section && state.section.id !== c.sectionId;
-  const { ahead, level } = radars.check(state.pos, moving ? state.heading : null, skip);
+  const check = radars.check(state.pos, moving ? state.heading : null, skip);
+  const { ahead } = check;
+  // Las zonas de vigilancia y los puntos habituales solo se avisan una vez (a 500 m), sin repetir al acercarse
+  const once = ahead && (ahead.cam.type === 'zone' || ahead.cam.type === 'hotspot');
+  const level = once && check.level === 2 ? 0 : check.level;
   if (!ahead) return hideAlert();
 
   const { cam, distance } = ahead;
@@ -488,7 +496,7 @@ function checkRadars() {
   const el = $('#radar-alert');
   el.classList.remove('hidden');
   el.classList.toggle('near', distance <= ALERT_NEAR_M);
-  el.classList.toggle('mobile', cam.type === 'mobile');
+  el.classList.toggle('mobile', cam.type === 'mobile' || cam.type === 'zone' || cam.type === 'hotspot');
   el.classList.toggle('section', cam.type === 'section_start' || cam.type === 'section_end');
   el.querySelector('.ra-icon').style.backgroundImage = `url(${icons[cam.type] ?? icons.fixed})`;
   el.querySelector('.ra-title').textContent = k.title + (cam.road ? ` · ${cam.road}` : '');
@@ -569,6 +577,8 @@ const icons = {
   mobile: blipDataURL('b-camera-mobile'),
   section_start: blipDataURL('b-camera-section'),
   section_end: blipDataURL('b-camera-section'),
+  zone: blipDataURL('b-zone'),
+  hotspot: blipDataURL('b-hotspot'),
 };
 
 $('#btn-report').addEventListener('click', async () => {
@@ -988,6 +998,8 @@ map.on('click', (e) => {
           .catch((err) => toast(`No se pudo enviar: ${err.message}`));
       }
     } else {
+      if (kind === 'zone') return toast('Zona de vigilancia de la DGT: aquí suele haber radares móviles');
+      if (kind === 'hotspot') return toast(`Punto habitual: aquí se han reportado radares móviles ${cam.properties.label.replace('HABITUAL ×', '')} veces`);
       const name = { section_start: 'Inicio de tramo', section_end: 'Fin de tramo' }[kind] ?? 'Radar fijo';
       toast(`${name}${maxspeed ? ` · límite ${maxspeed} km/h` : ' · límite desconocido'}`);
     }
